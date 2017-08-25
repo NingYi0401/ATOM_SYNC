@@ -1,0 +1,524 @@
+/* Copyright Statement:
+ *
+ * This software/firmware and related documentation ("MediaTek Software") are
+ * protected under relevant copyright laws. The information contained herein is
+ * confidential and proprietary to MediaTek Inc. and/or its licensors. Without
+ * the prior written permission of MediaTek inc. and/or its licensors, any
+ * reproduction, modification, use or disclosure of MediaTek Software, and
+ * information contained herein, in whole or in part, shall be strictly
+ * prohibited.
+ *
+ * MediaTek Inc. (C) 2015. All rights reserved.
+ *
+ * BY OPENING THIS FILE, RECEIVER HEREBY UNEQUIVOCALLY ACKNOWLEDGES AND AGREES
+ * THAT THE SOFTWARE/FIRMWARE AND ITS DOCUMENTATIONS ("MEDIATEK SOFTWARE")
+ * RECEIVED FROM MEDIATEK AND/OR ITS REPRESENTATIVES ARE PROVIDED TO RECEIVER
+ * ON AN "AS-IS" BASIS ONLY. MEDIATEK EXPRESSLY DISCLAIMS ANY AND ALL
+ * WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE OR
+ * NONINFRINGEMENT. NEITHER DOES MEDIATEK PROVIDE ANY WARRANTY WHATSOEVER WITH
+ * RESPECT TO THE SOFTWARE OF ANY THIRD PARTY WHICH MAY BE USED BY,
+ * INCORPORATED IN, OR SUPPLIED WITH THE MEDIATEK SOFTWARE, AND RECEIVER AGREES
+ * TO LOOK ONLY TO SUCH THIRD PARTY FOR ANY WARRANTY CLAIM RELATING THERETO.
+ * RECEIVER EXPRESSLY ACKNOWLEDGES THAT IT IS RECEIVER'S SOLE RESPONSIBILITY TO
+ * OBTAIN FROM ANY THIRD PARTY ALL PROPER LICENSES CONTAINED IN MEDIATEK
+ * SOFTWARE. MEDIATEK SHALL ALSO NOT BE RESPONSIBLE FOR ANY MEDIATEK SOFTWARE
+ * RELEASES MADE TO RECEIVER'S SPECIFICATION OR TO CONFORM TO A PARTICULAR
+ * STANDARD OR OPEN FORUM. RECEIVER'S SOLE AND EXCLUSIVE REMEDY AND MEDIATEK'S
+ * ENTIRE AND CUMULATIVE LIABILITY WITH RESPECT TO THE MEDIATEK SOFTWARE
+ * RELEASED HEREUNDER WILL BE, AT MEDIATEK'S OPTION, TO REVISE OR REPLACE THE
+ * MEDIATEK SOFTWARE AT ISSUE, OR REFUND ANY SOFTWARE LICENSE FEES OR SERVICE
+ * CHARGE PAID BY RECEIVER TO MEDIATEK FOR SUCH MEDIATEK SOFTWARE AT ISSUE.
+ *
+ * The following software/firmware and/or related documentation ("MediaTek
+ * Software") have been modified by MediaTek Inc. All revisions are subject to
+ * any receiver's applicable license agreements with MediaTek Inc.
+ */
+
+#include "image_refocus.h"
+
+namespace android {
+
+#define LOG_TAG "Gallery2_ImageRefocus"
+
+ImageRefocus::ImageRefocus(int jpsWidth, int jpsHeight, int maskWidth, int maskHeight, int posX, int posY,
+        int viewWidth, int viewHeight, int orientation, int mainCamPos, int touchCoordX1st, int touchCoordY1st,
+        int refocusMode, int depthRotation) {
+
+        memset(&mDCSRefocusInfo, 0, sizeof(mDCSRefocusInfo));
+        mDCSRefocusInfo.depthRotation = mDepthRotation = depthRotation;
+        mDCSRefocusInfo.depthWidth = jpsWidth / DCS_SAMPLE_SIZE;
+        mDCSRefocusInfo.depthHeight = jpsHeight / DCS_SAMPLE_SIZE / 2;
+        mDCSRefocusInfo.depthBufferSize = mDCSRefocusInfo.depthWidth * mDCSRefocusInfo.depthHeight * 4 + 256;
+	 
+	    m_pJpegFactory = new JpegFactory();
+        initMode = refocusMode;
+        int ret;
+        if (initMode == INIT_MODE_REFOCUS) {
+            ret = dcs_refocus_init(2560, 1920);
+            if(ret){
+                ALOGE("dcs: dcs_refocus_init error");
+            }
+        }
+        if (initMode == INIT_MODE_DEPTH) {
+            ret = dcs_depth_init();
+            if(ret){
+                ALOGE("dcs: dcs_depth_init error!");
+            }
+        }
+        // for debug
+        if (access(REFOCUS_DUMP_PATH, 0) != -1) {
+            m_DebugUtils = new DebugUtils(REFOCUS_DUMP_PATH);
+        }
+}
+
+bool ImageRefocus::initRefocusNoDepthMap(const char *sourceFilePath, int outImgWidth, int outImgHeight,
+        int imgOrientation, MUINT8* jpsBuffer, int jpsBufferSize, int jpsWidth, int jpsHeight,
+        MUINT8* maskBuffer, int maskBufferSize, int maskWidth, int maskHeight,
+        uint8_t* ldcBuffer, int ldcBufferSize, int ldcWidth, int ldcHeight) {
+
+    ALOGI("<initRefocusNoDepthMap>inStereoImgWidth %d, inStereoImgHeight %d, outImgWidth %d, outImgHeight %d,"
+            "depthRotation:%d", jpsWidth, jpsHeight, outImgWidth, outImgHeight, mDepthRotation);
+    bool result = initDcsJPSBuffer(jpsBuffer, jpsBufferSize, jpsWidth, jpsHeight);
+    if(!result){
+        ALOGE("dcs: initDcsJPSBuffer error");
+    }
+     //generate depth
+ALOGD("dcs: *******initRefocusNoDepthMap generate depth mDCSRefocusInfo.mDepthBufferSize: %d",mDCSRefocusInfo.depthBufferSize);
+     unsigned char* depthResult = (unsigned char*)malloc(mDCSRefocusInfo.depthBufferSize);
+     int ret = generateDcsDepth(mDCSRefocusInfo.jpsBufferAddr,mDCSRefocusInfo.jpsWidth,mDCSRefocusInfo.jpsHeight,depthResult);
+     ALOGE("dcs: initRefocusNoDepthMap depth end");
+     mDCSRefocusInfo.depthBufferAddr = depthResult;
+     copyDcsRefocusInfo();
+     ALOGE("dcs: initRefocusNoDepthMap end");
+     return true;
+}
+
+bool ImageRefocus::initRefocusNoDepthMap(uint8_t* jpegBuf, int jpegbufferSize, int outImgWidth,
+        int outImgHeight, int orientation, uint8_t* jpsBuffer, int jpsBufferSize, int jpsWidth, int jpsHeight,
+        uint8_t* maskBuffer, int maskBufferSize, int maskWidth, int maskHeight,
+        uint8_t* ldcBuffer, int ldcBufferSize, int ldcWidth, int ldcHeight) {
+    //not used
+    return FAIL;
+}
+
+bool ImageRefocus::initRefocusWithDepthMap(const char *sourceFilePath, int outImgWidth, int outImgHeight,
+        int orientation, MUINT8* depthBuffer, int depthBufferSize, int jpsWidth, int jpsHeight) {
+    ALOGI("<initRefocusWithDepthMap> outImgWidth %d, outImgHeight %d, depthBuffer %, depthBufferSize %d",
+             outImgWidth, outImgHeight, depthBuffer, depthBufferSize);
+
+    initDcsRefocusIMGSource(sourceFilePath, outImgWidth, outImgHeight,DCS_SAMPLE_SIZE);
+
+    dcs_img_buf srcData;
+    srcData.data = mDCSRefocusInfo.srcImgAddr;
+    srcData.width = mDCSRefocusInfo.srcImgWidth;
+    srcData.height = mDCSRefocusInfo.srcImgHeight;
+    srcData.stride[0] = -1;
+    srcData.stride[1] = -1;
+    srcData.format = COLOR_FORMAT_YUV_I420;
+
+    dcs_img_buf depthData;
+    depthData.data = depthBuffer;
+    depthData.width = mDCSRefocusInfo.depthWidth;
+    depthData.height = mDCSRefocusInfo.depthHeight;
+    depthData.stride[0] = -1;
+    depthData.stride[1] = -1;
+    depthData.format = COLOR_FORMAT_GRAY;
+    int ret = dcs_refocus_setRefocusImage(&srcData,&depthData);
+    ALOGD("dcs: set image refocus status: %d",ret);
+    return !ret;
+}
+
+bool ImageRefocus::initRefocusWithDepthMap(uint8_t* jpegBuf, int jpegbufferSize, int outImgWidth, int outImgHeight,
+        int orientation, MUINT8* depthBuffer, int depthBufferSize, int jpsWidth, int jpsHeight) {
+    //not used
+    return FAIL;
+}
+
+
+ImageBuffer ImageRefocus::generateRefocusImage(int touchCoordX, int touchCoordY, int depthOfField) {
+    ImageBuffer image;
+    memset(&image, 0, sizeof(image));
+    image.width = mDCSRefocusInfo.srcImgWidth;
+    image.height = mDCSRefocusInfo.srcImgHeight;
+    image.buffer = (unsigned char*)malloc(image.width * image.height * 4);
+    dcs_img_buf refocused;
+    refocused.format = COLOR_FORMAT_RGBA;
+    refocused.data = image.buffer;
+    refocused.stride[0] = -1;
+    refocused.stride[1] = -1;
+    refocused.width = image.width / 2;
+    refocused.height = image.height / 2;
+	
+    mDCSRefocusInfo.fNumber = ceil((37-depthOfField)*0.444);
+    mDCSRefocusInfo.touchCoordX = touchCoordX;
+    mDCSRefocusInfo.touchCoordY = touchCoordY;
+    int ret = dcs_refocus_doRefocus(touchCoordX, touchCoordY, mDCSRefocusInfo.fNumber, &refocused);
+    ALOGI("dcs: do refocus status: return %d touchX %d touchY %d fNumber %f ",
+                                ret,touchCoordX,touchCoordY,mDCSRefocusInfo.fNumber);
+    return image;
+}
+
+void ImageRefocus::deinit() {
+    ALOGI("<deinit>start release memory!");
+    int ret;
+    if(initMode == INIT_MODE_REFOCUS){
+        ret = dcs_refocus_uninit();
+        if(ret){
+            ALOGE("dcs: dcs_refocus_uninit error");
+        }
+    }
+    if(initMode == INIT_MODE_DEPTH){
+        ret = dcs_depth_uninit();
+        if(ret){
+            ALOGE("dcs: dcs_depth_uninit error!");
+        }
+    }
+
+    if(mDCSRefocusInfo.depthBufferAddr != NULL){
+        free(mDCSRefocusInfo.depthBufferAddr);
+        mDCSRefocusInfo.depthBufferAddr = NULL;
+    }
+    if(mDCSRefocusInfo.jpsBufferAddr != NULL){
+        free(mDCSRefocusInfo.jpsBufferAddr);
+        mDCSRefocusInfo.jpsBufferAddr = NULL;
+    }
+    if(mDCSRefocusInfo.srcImgAddr != NULL){
+        free(mDCSRefocusInfo.srcImgAddr);
+        mDCSRefocusInfo.srcImgAddr = NULL;
+    }
+    ALOGI("<deinit>end");
+}
+
+int ImageRefocus::getDepthBufferSize() {
+    ALOGI("<getDepthBufferSize>DepthBufferSize %d,instance ID:%p ", mDepthBufferSize, this);
+    return mDepthBufferSize;
+}
+
+int ImageRefocus::getDepthBufferWidth() {
+    if (mDepthRotation == ORIENTATION_90 || mDepthRotation == ORIENTATION_270) {
+        ALOGI("<getDepthBufferWidth>%d, instance ID %p ", mDepthBufferHeight, this);
+        return mDepthBufferHeight;
+    }
+    ALOGI("<getDepthBufferWidth>%d, instance ID %p", mDepthBufferWidth, this);
+    return mDepthBufferWidth;
+}
+
+int ImageRefocus::getDepthBufferHeight() {
+    if (mDepthRotation == ORIENTATION_90 || mDepthRotation == ORIENTATION_270) {
+        ALOGI("<getDepthBufferHeight>%d, instance ID %p", mDepthBufferWidth, this);
+        return mDepthBufferWidth;
+    }
+    ALOGI("<getDepthBufferHeight>%d, instance ID %p", mDepthBufferHeight, this);
+    return mDepthBufferHeight;
+}
+
+int ImageRefocus::getXMPDepthBufferSize() {
+    ALOGI("<getXMPDepthBufferSize>mXMPDepthSize %d, instance ID %p", mXMPDepthSize, this);
+    return mXMPDepthSize;
+}
+
+int ImageRefocus::getXMPDepthBufferWidth() {
+    ALOGI("<getXMPDepthBufferWidth>mXMPDepthWidth %d, instance ID %p", mXMPDepthWidth, this);
+    return mXMPDepthWidth;
+}
+
+int ImageRefocus::getXMPDepthBufferHeight() {
+    ALOGI("<getXMPDepthBufferHeight>mXMPDepthHeight %d, instance ID %p", mXMPDepthHeight, this);
+    return mXMPDepthHeight;
+}
+
+int ImageRefocus::getMetaBufferWidth() {
+    if (mDepthRotation == ORIENTATION_90 || mDepthRotation == ORIENTATION_270) {
+        ALOGI("<getMetaBufferWidth>%d, instance ID %p", mMetaBufferHeight, this);
+        return mMetaBufferHeight;
+    }
+    ALOGI("<getMetaBufferWidth>%d, instance ID %p", mMetaBufferWidth, this);
+    return mMetaBufferWidth;
+}
+int ImageRefocus::getMetaBufferHeight() {
+    if (mDepthRotation == ORIENTATION_90 || mDepthRotation == ORIENTATION_270) {
+        ALOGI("<getMetaBufferHeight>%d, instance ID %p", mMetaBufferWidth, this);
+        return mMetaBufferWidth;
+    }
+    ALOGI("<getMetaBufferHeight>%d, instance ID %p", mMetaBufferHeight, this);
+    return mMetaBufferHeight;
+}
+
+void ImageRefocus::saveDepthMapInfo(MUINT8* depthBufferArray, MUINT8* xmpDepthBufferArray) {
+    memcpy(depthBufferArray, (MUINT8*)mDCSRefocusInfo.depthBufferAddr, mDCSRefocusInfo.depthBufferSize);
+    if (NULL != m_DebugUtils) {
+        m_DebugUtils->dumpBufferToFile("depth.raw", depthBufferArray, mDCSRefocusInfo.depthBufferSize);
+    }
+}
+
+void ImageRefocus::saveRefocusImage(const char *saveFileName, int inSampleSize) {
+    char file[FILE_NAME_LENGTH];
+    FILE *fp;
+    unsigned char *jpgBuf = NULL;
+    unsigned int jpegSize = 0;
+
+    initDcsRefocusIMGSource(mDCSRefocusInfo.sourceFileName,
+                    mDCSRefocusInfo.srcImgWidth ,mDCSRefocusInfo.srcImgHeight,1);
+
+    dcs_img_buf srcData;
+    srcData.data = mDCSRefocusInfo.srcImgAddr;
+    srcData.width = mDCSRefocusInfo.srcImgWidth;
+    srcData.height = mDCSRefocusInfo.srcImgHeight;
+    srcData.stride[0] = -1;
+    srcData.stride[1] = -1;
+    srcData.format = COLOR_FORMAT_YUV_I420;
+
+    dcs_img_buf refocusedData;
+    refocusedData.data = (unsigned char*)malloc((srcData.width * srcData.height * 3)/2);
+    refocusedData.format = COLOR_FORMAT_YUV_I420;
+    refocusedData.width = mDCSRefocusInfo.srcImgWidth;
+    refocusedData.height = mDCSRefocusInfo.srcImgHeight;
+    refocusedData.stride[0] = -1;
+    refocusedData.stride[1] = -1;
+    int ret =  dcs_refocus_saveRefocus(&srcData,mDCSRefocusInfo.touchCoordX * DCS_SAMPLE_SIZE,
+                    mDCSRefocusInfo.touchCoordY * DCS_SAMPLE_SIZE, mDCSRefocusInfo.fNumber, &refocusedData);
+    ALOGD("dcs: save image refocus status: %d width: %d height: %d sampleSize %d",
+                                    ret,refocusedData.width,refocusedData.height,inSampleSize);
+    sprintf(file, "%s", saveFileName);
+    fp = fopen(file, "w");
+    if (fp == NULL) {
+        ALOGI("ERROR: Open file %s failed!!!", file);
+        return;
+    }
+    // should free this memory when not use it !!!
+    int imageWidth = mDCSRefocusInfo.srcImgWidth;
+    int imageHeight = mDCSRefocusInfo.srcImgHeight;
+    jpgBuf = (unsigned char *) malloc(imageWidth * imageHeight);
+    if (jpgBuf == NULL) {
+        ALOGI("ERROR: Can not allocate memory!!!");
+        fclose(fp);
+        return;
+    }
+    m_pJpegFactory->yv12ToJpg((unsigned char *)refocusedData.data, imageWidth * imageHeight,
+            imageWidth, imageHeight, jpgBuf, imageWidth * imageHeight, &jpegSize);
+    dumpBufferToFile(jpgBuf, jpegSize, file);
+    free(jpgBuf);
+    free(refocusedData.data);
+    fclose(fp);
+    jpgBuf = NULL;
+}
+
+ImageRefocus::~ImageRefocus() {
+    if (m_pJpegFactory != NULL) {
+        delete m_pJpegFactory;
+        m_pJpegFactory = NULL;
+    }
+    if (NULL != m_DebugUtils) {
+        delete m_DebugUtils;
+        m_DebugUtils = NULL;
+    }
+    ALOGI("~ImageRefocus");
+}
+
+void ImageRefocus::dumpBufferToFile(unsigned char* buffer, int bufferSize, char* fileName) {
+    FILE* fp;
+    int index;
+
+    ALOGI("<dumpBufferToFile>buffer address:%p, bufferSize %d, fileName:%s", buffer,
+            bufferSize, fileName);
+
+    if (buffer == NULL) {
+        ALOGI("ERROR: null buffer address, dump fail!!!");
+        return;
+    }
+
+    fp = fopen(fileName, "w");
+    if (fp == NULL) {
+        ALOGI("ERROR: Open file %s failed.", fileName);
+        return;
+    }
+
+    for (index = 0 ; index < bufferSize; index++) {
+        fprintf(fp, "%c", buffer[index]);
+    }
+    fclose(fp);
+    ALOGI("<dumpBufferToFile>dump buffer to file success!");
+}
+
+void ImageRefocus::rotateBuffer(MUINT8*  bufferIn, MUINT8*  bufferOut, int bufferWidth,
+        int bufferHeight, int orientation) {
+    ALOGI("<rotateBuffer>bufferWidth %d, bufferHeight %d, orientation %d",
+            bufferWidth, bufferHeight, orientation);
+
+    int index = 0;
+    switch (orientation) {
+    case ORIENTATION_90:
+        // rotate 90 degree, clockwise
+        index = 0;
+        for (int i = bufferHeight - 1; i >= 0; i--) {
+            for (int j = 0; j < bufferWidth; j++) {
+                bufferOut[i + j * bufferHeight] = bufferIn[index];
+                index++;
+            }
+        }
+        break;
+
+    case ORIENTATION_270:
+        // rotate 270 degree, clockwise
+        index = 0;
+        for (int i = 0; i < bufferHeight; i++) {
+            for (int j = bufferWidth - 1; j >= 0; j--) {
+                bufferOut[i + j * bufferHeight] = bufferIn[index];
+                index++;
+            }
+        }
+        break;
+
+    case ORIENTATION_180:
+        // rotate 180 degree, clockwise
+        index = 0;
+        for (int j = bufferHeight - 1; j >= 0; j--) {
+            for (int i = bufferWidth - 1; i >= 0; i--) {
+                bufferOut[i + j * bufferWidth] = bufferIn[index];
+                index++;
+            }
+        }
+        break;
+
+    case ORIENTATION_0:
+    default:
+        // no need rotation
+        bufferOut = bufferIn;
+        break;
+    }
+}
+
+//dcs add
+bool ImageRefocus::initDcsJPSBuffer(unsigned char* jpsBuffer, int jpsBufferSize, int jpsWidth, int jpsHeight) {
+    if (NULL != m_DebugUtils) {
+        m_DebugUtils->dumpBufferToFile("dcs_jps.jpg", jpsBuffer, jpsBufferSize);
+    }
+    ImageInfo dstBuffer;
+    unsigned char* pJpsBuffer = (unsigned char *) malloc(ALIGN128(jpsBufferSize) + 512 + 127);
+    unsigned char * align128_file_buffer = (unsigned char *) ((((size_t)pJpsBuffer + 127) >> 7) << 7);
+
+    if (pJpsBuffer == NULL) {
+        ALOGE("ERROR: pJpsBuffer malloc fail!!!");
+        return false;
+    }
+    memcpy(align128_file_buffer, jpsBuffer, jpsBufferSize);
+    if (!m_pJpegFactory->jpgToYV12(align128_file_buffer, jpsBufferSize, &dstBuffer,1)) {
+        ALOGE("ERROR: decode failed!!");
+        free(pJpsBuffer);
+        pJpsBuffer = NULL;
+        return false;
+    }
+    free(pJpsBuffer);
+    pJpsBuffer = NULL;
+
+    // jps parse start
+    mDCSRefocusInfo.jpsWidth = dstBuffer.width;
+    mDCSRefocusInfo.jpsHeight = dstBuffer.height;
+    mDCSRefocusInfo.jpsBufferAddr = (unsigned char*)dstBuffer.destBuffer;
+    if (NULL != m_DebugUtils) {
+        m_DebugUtils->dumpBufferToFile("dcs_jps.yuv", dstBuffer.destBuffer, dstBuffer.bufferSize);
+    }
+    ALOGI("dcs:: init dcs jpsBuffer end w:%d h:%d size:%d",
+                           mDCSRefocusInfo.jpsWidth,mDCSRefocusInfo.jpsHeight,dstBuffer.bufferSize);
+    return true;
+}
+
+void ImageRefocus::initDcsRefocusIMGSource(const char *sourceFilePath, int outImgWidth, int outImgHeight,float sampleSize) {
+    ImageInfo dstBuffer;
+    //format string
+    sprintf(mDCSRefocusInfo.sourceFileName, "%s", sourceFilePath);
+
+    m_pJpegFactory->jpgDecode(sourceFilePath, &dstBuffer,sampleSize);
+
+    // for target image
+    mDCSRefocusInfo.srcImgWidth = dstBuffer.width;
+    mDCSRefocusInfo.srcImgHeight = dstBuffer.height;
+    mDCSRefocusInfo.srcImgAddr = dstBuffer.destBuffer;
+    if (NULL != m_DebugUtils) {
+        m_DebugUtils->dumpBufferToFile("dcs_jpg.yuv", dstBuffer.destBuffer, dstBuffer.bufferSize);
+    }
+    ALOGI("dcs: <initRefocusIMGSource> decode image resource end %d %d %d",
+            mDCSRefocusInfo.srcImgWidth,mDCSRefocusInfo.srcImgHeight,mDCSRefocusInfo.srcImgAddr);
+}
+
+int ImageRefocus::generateDcsDepth(unsigned char* jpsYUVData,int jpsW,int jpsH,unsigned char* depthResult)
+{
+    int size = jpsW * (jpsH/2) * 3 /2;
+    unsigned char* mainData = (unsigned char*)malloc(size);
+    unsigned char* subData = (unsigned char*)malloc(size);
+
+    //split jps image
+    int ret = getMainAndSubData(jpsYUVData , mainData ,subData);
+    int rotation = (mDepthRotation + 90) % 360;
+    // main image info
+    dcs_img_buf main;
+    main.data = mainData;
+    main.width = jpsW;
+    main.height = jpsH / 2;
+    main.stride[0] = -1;
+    main.stride[1] = -1;
+    main.rotation = rotation;
+    main.format = COLOR_FORMAT_YUV_I420;
+    // sub image info
+    dcs_img_buf sub;
+    sub.data = subData;
+    sub.width = jpsW;
+    sub.height = jpsH / 2;
+    sub.stride[0] = -1;
+    sub.stride[1] = -1;
+    sub.rotation = rotation;
+    sub.format = COLOR_FORMAT_YUV_I420;
+    // depth image
+    dcs_img_buf depth;
+    depth.width = mDCSRefocusInfo.depthWidth;
+    depth.height = mDCSRefocusInfo.depthHeight;
+    depth.stride[0] = -1;
+    depth.stride[1] = -1;
+    depth.data = depthResult;
+    depth.rotation = 90;
+    depth.format = COLOR_FORMAT_GRAY;
+    ALOGD("dcs:  dcs_depth_generate start depth.rotation = 0 ");
+    ret = dcs_depth_generate(&main, &sub, &depth);
+    if(ret){
+         ALOGE("dcs: dcs_depth_generate error!");
+    }
+    free(mainData);
+    free(subData);
+    ALOGD("dcs:  dcs_depth_generate end width: %d height:%d",depth.width,depth.height);
+    return ret;
+}
+//split yuv image
+int ImageRefocus::getMainAndSubData(unsigned char* jpsData, unsigned char * mainData, unsigned char * subData){
+    //because main and sub size is same ,just use main Size
+    int orgYSize = mDCSRefocusInfo.jpsWidth * mDCSRefocusInfo.jpsHeight;
+    int orgUSize = orgYSize / 4;
+    int YSize = orgYSize / 2;
+    int USize = YSize / 4;
+    //main and sub Y
+    memcpy(mainData , jpsData , orgYSize/2);
+    memcpy(subData, jpsData + orgYSize/2 , orgYSize/2);
+    //main u v
+    memcpy(mainData + YSize ,jpsData + orgYSize, USize);
+    memcpy(mainData + YSize + USize,jpsData + orgYSize + 2 * USize,USize);
+    //sub u v
+    memcpy(subData + YSize ,jpsData + orgYSize + USize, USize);
+    memcpy(subData + YSize + USize,jpsData + orgYSize + 3 * USize,USize);
+    return 0;
+}
+
+void ImageRefocus::copyDcsRefocusInfo() {
+
+    mDepthBufferWidth = mDCSRefocusInfo.depthWidth;
+    mDepthBufferHeight = mDCSRefocusInfo.depthHeight;
+   // mDepthBufferSize = 486000;
+   mDepthBufferSize = mDCSRefocusInfo.depthWidth * mDCSRefocusInfo.depthHeight * 4 + 256;
+    mMetaBufferWidth = 240;
+    mMetaBufferHeight  = 135;
+    mXMPDepthWidth =  0;
+    mXMPDepthHeight = 0;
+    mXMPDepthSize = 1;
+ ALOGD("dcs: *******copyDcsRefocusInfo end mDepthBufferSize: %d ",mDepthBufferSize);
+}
+//dcs add end
+}  // namespace android

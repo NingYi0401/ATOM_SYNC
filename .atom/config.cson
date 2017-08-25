@@ -1,0 +1,41 @@
+"*":
+  "activate-power-mode":
+    comboMode: {}
+    particles:
+      colours:
+        type: "random"
+    plugins:
+      playAudio: false
+      screenShake: true
+  "atom-beautify":
+    c:
+      configPath: "C:\\Users\\ny-xchip\\.atom\\packages\\uncrustify-0.65-win64\\cfg\\uncrustify.cfg"
+    cpp:
+      configPath: "C:\\Users\\ny-xchip\\.atom\\packages\\uncrustify-0.65-win64\\cfg\\uncrustify.cfg"
+    executables:
+      uncrustify:
+        path: "D:\\2.下载\\2.浏览器下载\\uncrustify-0.65-win64\\uncrustify.exe"
+    general: {}
+  "atom-ctags":
+    autoBuildTagsWhenActive: true
+  autosave:
+    enabled: true
+  core:
+    closeDeletedFileTabs: true
+    disabledPackages: [
+      "symbols-view"
+    ]
+    telemetryConsent: "no"
+  editor:
+    showIndentGuide: true
+    tabLength: 4
+  "exception-reporting":
+    userId: "5251f41f-9f67-4703-a628-f7349f23c956"
+  minimap:
+    plugins:
+      "highlight-selected": true
+      "highlight-selectedDecorationsZIndex": 0
+  "split-diff":
+    ignoreWhitespace: true
+  "sync-settings":
+    personalAccessToken: " 1e68a61e4dab0b020de5f375d7073df026af75e4"
